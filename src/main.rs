@@ -1,6 +1,6 @@
-use axum::{routing::get, Router, Json};
+use axum::{routing::{get, post}, Router, Json};
 use std::net::SocketAddr;
-use serde::Serialize;
+use serde::{Serialize,Deserialize};
 
 #[derive(Serialize)]
 struct Task {
@@ -9,10 +9,16 @@ struct Task {
     completed: bool,
 }
 
+#[derive(Deserialize)]
+struct CreateTaskRequest {
+    title: String,
+}
+
 #[tokio::main]
 async fn main() {
     let app = Router::new().route("/", get(home_page))
-    .route("/task", get(get_task));
+    .route("/task", get(get_task))
+    .route("/task", post(create_task));
 
     let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
     println!("Server running up at http://{}", addr);
@@ -35,4 +41,10 @@ async fn get_task() -> Json<Task> {
 
     Json(my_todo)
 }
+
+async fn create_task(Json(payload): Json<CreateTaskRequest>) -> String {
+    format!("Success! Backend unpacked your JSON. Title received: '{}'", payload.title)
+}
+
+
 
