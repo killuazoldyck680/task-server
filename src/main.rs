@@ -1,8 +1,9 @@
-use axum::{routing::{get, post}, Router, Json};
+use axum::{Json, Router, extract::State, routing::{get, post}};
 use std::net::SocketAddr;
 use serde::{Serialize,Deserialize};
+use std::sync::{Arc, Mutex};
 
-#[derive(Serialize)]
+#[derive(Serialize, Clone)]
 struct Task {
     id: u64,
     title: String,
@@ -14,11 +15,17 @@ struct CreateTaskRequest {
     title: String,
 }
 
+type AppState = Arc<Mutex<Vec<Task>>>;
+
 #[tokio::main]
 async fn main() {
+
+    let shared_state: AppState = Arc::new(Mutex::new(Vec::new()));
+
     let app = Router::new().route("/", get(home_page))
-    .route("/task", get(get_task))
-    .route("/task", post(create_task));
+    .route("/task", get(get_all_task))
+    .route("/task", post(create_task))
+    .with_state(shared_state);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
     println!("Server running up at http://{}", addr);
@@ -32,18 +39,28 @@ async fn home_page() -> &'static str {
     "Hello! You have successfully reached your brand-new Rust server!"
 }
 
-async fn get_task() -> Json<Task> {
-    let my_todo = Task {
-        id: 1,
-        title: String::from("Learn Rust Web Development"),
+async fn get_all_task(State(state): State<AppState>) -> Json<Vec<Task>> {
+    let tasks = state.lock().unwrap();
+    Json(tasks.clone())
+}
+
+async fn create_task  (
+    State(state): State<AppState>,
+    Json(payload): Json<CreateTaskRequest>,
+) -> Json<Task> {
+    let mut tasks = state.lock().unwrap();
+
+    let new_id = (tasks.len() + 1) as u64;
+
+    let new_task = Task {
+        id: new_id,
+        title: payload.title,
         completed: false,
     };
 
-    Json(my_todo)
-}
+    tasks.push(new_task.clone());
 
-async fn create_task(Json(payload): Json<CreateTaskRequest>) -> String {
-    format!("Success! Backend unpacked your JSON. Title received: '{}'", payload.title)
+    Json(new_task)
 }
 
 
