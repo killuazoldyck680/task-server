@@ -1,13 +1,15 @@
 use axum::http::StatusCode;
 use axum::{Json, Router, extract::{State,Path}, routing::{get, post,patch,delete}};
+use sqlx::SqlitePool;
 use std::net::SocketAddr;
 use serde::{Serialize,Deserialize};
-use std::sync::{Arc, Mutex};
+
+use sqlx::{sqlite::Sqlite, Row};
 
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, sqlx::FromRow)]
 struct Task {
-    id: u64,
+    id: i64,
     title: String,
     completed: bool,
 }
@@ -17,12 +19,24 @@ struct CreateTaskRequest {
     title: String,
 }
 
-type AppState = Arc<Mutex<Vec<Task>>>;
+type AppState = SqlitePool;
 
 #[tokio::main]
 async fn main() {
 
-    let shared_state: AppState = Arc::new(Mutex::new(Vec::new()));
+    let db_url = "sqlite://tasks.db?mode=rwc";
+    let pool = SqlitePool::connect(db_url).await.expect("Failed to connect to SQLite");
+
+    sqlx::query(
+       "CREATE TABLE IF NOT EXISTS tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            completed BOOLEAN NOT NULL DEFAULT FALSE
+         );" 
+    )
+    .execute(&pool)
+    .await
+    .expect("Failed to initialize database table");
 
     let app = Router::new().route("/", get(home_page))
     .route("/task", get(get_all_task))
@@ -30,7 +44,7 @@ async fn main() {
     
     .route("/task/{id}", patch(toggle_task_completion))
     .route("/task/{id}", delete(delete_task))
-    .with_state(shared_state);
+    .with_state(pool);
 
     let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
     println!("Server running up at http://{}", addr);
@@ -44,53 +58,59 @@ async fn home_page() -> &'static str {
     "Hello! You have successfully reached your brand-new Rust server!"
 }
 
-async fn get_all_task(State(state): State<AppState>) -> Json<Vec<Task>> {
-    let tasks = state.lock().unwrap();
-    Json(tasks.clone())
+async fn get_all_task(State(pool): State<AppState>) -> Result<Json<Vec<Task>>, StatusCode>  {
+    let tasks = sqlx::query_as::<_,Task>("SELECT id, title, completed FROM tasks")
+    .fetch_all(&pool)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(tasks))
+    
 }
 
 async fn create_task  (
-    State(state): State<AppState>,
+    State(pool): State<AppState>,
     Json(payload): Json<CreateTaskRequest>,
-) -> Json<Task> {
-    let mut tasks = state.lock().unwrap();
+) -> Result<Json<Task>, StatusCode> {
+    let new_task = sqlx::query_as::<_, Task> (
+        "INSERT INTO tasks (title, completed) VALUES ($1, FALSE) RETURNING id, title, completed"
+    )
+    .bind(payload.title)
+    .fetch_one(&pool)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let new_id = (tasks.len() + 1) as u64;
-
-    let new_task = Task {
-        id: new_id,
-        title: payload.title,
-        completed: false,
-    };
-
-    tasks.push(new_task.clone());
-
-    Json(new_task)
+    Ok(Json(new_task))
 }
 
-async fn toggle_task_completion(State(state): State<AppState>,
-    Path(id): Path<u64>) -> Result<Json<Task>, StatusCode> {
-        let mut tasks = state.lock().unwrap();
+async fn toggle_task_completion(State(pool): State<AppState>,
+    Path(id): Path<i64>) -> Result<Json<Task>, StatusCode> {
+        let updated_task = sqlx::query_as::<_,Task>(
+           "UPDATE tasks SET completed = NOT completed WHERE id = $1 RETURNING id, title, completed" 
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .map_err(|e| match e {
+            sqlx::Error::RowNotFound => StatusCode::NOT_FOUND, // 404 if ID doesn't exist
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+        })?;
 
-        if let Some(task) = tasks.iter_mut().find(|t| t.id == id) {
-            task.completed = !task.completed;
-            Ok(Json(task.clone()))
-        } else {
-            Err(StatusCode::NOT_FOUND)
-        }
+        Ok(Json(updated_task))
     }
 
-async fn delete_task(State(state): State<AppState>, Path(id): Path<u64>) -> Result<String, StatusCode> {
-    let mut tasks = state.lock().unwrap();
+async fn delete_task(State(pool): State<AppState>, Path(id): Path<i64>) -> Result<String, StatusCode> {
+    let db_result = sqlx::query("DELETE FROM tasks WHERE id = $1")
+    .bind(id)
+    .execute(&pool)
+    .await;
+    
+    let query_result = db_result.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let initial_len = tasks.len();
-
-    tasks.retain(|task| task.id != id);
-
-    if tasks.len() < initial_len {
-       Ok(format!("Task {} was successfully deleted", id)) 
-    } else {
+    if query_result.rows_affected() == 0 {
         Err(StatusCode::NOT_FOUND)
+    } else {
+        Ok(format!("Task {} was successfully deleted from disk database", id))
     }
 }    
 
