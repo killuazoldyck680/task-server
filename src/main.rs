@@ -1,10 +1,11 @@
 use axum::http::StatusCode;
-use axum::{Json, Router, extract::{State,Path}, routing::{get, post,patch,delete}};
+use axum::{Json, Router, extract::{State,Path,FromRequest}, routing::{get, post,patch,delete}};
 use sqlx::SqlitePool;
 use std::net::SocketAddr;
 use serde::{Serialize,Deserialize};
-
+use validator::Validate;
 use sqlx::{sqlite::Sqlite, Row};
+use serde::de::DeserializeOwned;
 
 
 #[derive(Serialize, Clone, sqlx::FromRow)]
@@ -14,12 +15,39 @@ struct Task {
     completed: bool,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize,Validate)]
 struct CreateTaskRequest {
+    #[validate(length(min = 1,max = 100, message = "Title cannot be empty or exceed 100 characters"))]
     title: String,
 }
 
 type AppState = SqlitePool;
+struct ValidatedJson<T>(T);
+
+impl <S,T> FromRequest<S> for ValidatedJson<T> 
+    where 
+    T : DeserializeOwned + Validate,
+    S: Send + Sync,
+
+    {
+        type Rejection = (StatusCode, String);
+
+        async fn from_request(req: axum::extract::Request, state: &S) -> Result<Self, Self::Rejection> {
+            let Json(value) = Json::<T>::from_request(req, state)
+            .await
+            .map_err(|e| (StatusCode::BAD_REQUEST, e.to_string()))?;
+
+        if let Err(validation_errors) = value.validate() {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("Validation failed: {}", validation_errors),
+            ));
+        }
+        Ok(ValidatedJson(value))
+        }
+        
+    }
+
 
 #[tokio::main]
 async fn main() {
@@ -70,7 +98,7 @@ async fn get_all_task(State(pool): State<AppState>) -> Result<Json<Vec<Task>>, S
 
 async fn create_task  (
     State(pool): State<AppState>,
-    Json(payload): Json<CreateTaskRequest>,
+    ValidatedJson(payload): ValidatedJson<CreateTaskRequest>,
 ) -> Result<Json<Task>, StatusCode> {
     let new_task = sqlx::query_as::<_, Task> (
         "INSERT INTO tasks (title, completed) VALUES ($1, FALSE) RETURNING id, title, completed"
