@@ -1,5 +1,5 @@
 use axum::http::StatusCode;
-use axum::{Json, Router, extract::{State,Path,FromRequest}, routing::{get, post,patch,delete}};
+use axum::{Json, Router, extract::{State,Path,FromRequest, FromRequestParts}, routing::{get, post,patch,delete}};
 use sqlx::SqlitePool;
 use std::net::SocketAddr;
 use serde::{Serialize,Deserialize};
@@ -22,6 +22,36 @@ struct CreateTaskRequest {
 }
 
 type AppState = SqlitePool;
+
+struct ApiKey;
+
+const SECRET_API_KEY: &str = "my-super-secret-freelance-key-123";
+
+impl<S> FromRequestParts<S> for ApiKey
+where 
+    S: Send + Sync
+    {
+        type Rejection = (StatusCode, String);
+
+        async fn from_request_parts(
+            parts: &mut axum::http::request::Parts,
+            state: &S,
+        ) -> Result<Self, Self::Rejection>
+        {
+            if let Some(key_header) = parts.headers.get("X-API-Key") {
+                if let Ok(key_str) = key_header.to_str() {
+                    if key_str == SECRET_API_KEY {
+                        return Ok(ApiKey);
+                    }
+                }
+                return Err((StatusCode::UNAUTHORIZED, "Invalid API Key provided".to_string()));
+            }
+
+           Err((StatusCode::UNAUTHORIZED, "Missing X-API-Key header".to_string())) 
+        }
+
+    }
+
 struct ValidatedJson<T>(T);
 
 impl <S,T> FromRequest<S> for ValidatedJson<T> 
@@ -97,6 +127,7 @@ async fn get_all_task(State(pool): State<AppState>) -> Result<Json<Vec<Task>>, S
 }
 
 async fn create_task  (
+    _auth: ApiKey,
     State(pool): State<AppState>,
     ValidatedJson(payload): ValidatedJson<CreateTaskRequest>,
 ) -> Result<Json<Task>, StatusCode> {
@@ -127,7 +158,9 @@ async fn toggle_task_completion(State(pool): State<AppState>,
         Ok(Json(updated_task))
     }
 
-async fn delete_task(State(pool): State<AppState>, Path(id): Path<i64>) -> Result<String, StatusCode> {
+async fn delete_task(
+    _auth: ApiKey,
+    State(pool): State<AppState>, Path(id): Path<i64>) -> Result<String, StatusCode> {
     let db_result = sqlx::query("DELETE FROM tasks WHERE id = $1")
     .bind(id)
     .execute(&pool)
